@@ -82,6 +82,8 @@ export default function InspectorPanel() {
         )}
         {taskAnnotations.map((annotation) => {
           const label = labels.find((item) => item.id === annotation.labelId);
+          const dangling = annotation.kind === "text-span" && annotation.anchorStatus === "dangling";
+          const anchorText = annotation.kind === "text-span" ? annotation.anchorText : undefined;
           return (
             <ListItem
               key={annotation.id}
@@ -99,8 +101,19 @@ export default function InspectorPanel() {
               >
                 <Box sx={{ width: 9, height: 9, borderRadius: "50%", bgcolor: label?.color ?? "#777", mr: 1.2, flexShrink: 0 }} />
                 <ListItemText
-                  primary={`${label?.name ?? "未命名"} · ${annotationLabel(annotation.kind)}`}
-                  secondary={`${annotation.author} · 置信度 ${((annotation.confidence ?? 0.9) * 100).toFixed(0)}%`}
+                  primary={
+                    <Stack direction="row" spacing={0.6} alignItems="center">
+                      <Box component="span" sx={{ fontSize: 11.5, fontWeight: 800 }}>
+                        {label?.name ?? "未命名"} · {annotationLabel(annotation.kind)}
+                      </Box>
+                      {dangling && <Chip size="small" color="warning" variant="outlined" label="悬空留档" sx={{ height: 17, fontSize: 8.5 }} />}
+                    </Stack>
+                  }
+                  secondary={
+                    dangling
+                      ? `原文已随 ${(annotation as { dangledByRevision?: string }).dangledByRevision ?? "修订"} 移除 · “${anchorText}”`
+                      : `${annotation.author} · 置信度 ${((annotation.confidence ?? 0.9) * 100).toFixed(0)}%`
+                  }
                   primaryTypographyProps={{ fontSize: 11.5, fontWeight: 800 }}
                   secondaryTypographyProps={{ fontSize: 9.8 }}
                 />

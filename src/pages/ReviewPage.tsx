@@ -22,32 +22,41 @@ import {
   WarningAmberRounded,
 } from "@mui/icons-material";
 import ReviewCanvas from "../components/ReviewCanvas";
-import { labelsByKind, mockConflicts } from "../data/mockData";
+import { labelsByKind } from "../data/mockData";
 import { useWorkbenchStore } from "../stores/workbenchStore";
 import { taskKindLabels } from "../utils/task";
 
 export default function ReviewPage() {
   const tasks = useWorkbenchStore((state) => state.tasks);
   const annotations = useWorkbenchStore((state) => state.annotations);
+  const reviewConflicts = useWorkbenchStore((state) => state.reviewConflicts);
   const reviewerVisibility = useWorkbenchStore((state) => state.reviewerVisibility);
   const resolvedConflicts = useWorkbenchStore((state) => state.resolvedConflicts);
   const reviewNotes = useWorkbenchStore((state) => state.reviewNotes);
   const toggleReviewer = useWorkbenchStore((state) => state.toggleReviewer);
   const resolveConflict = useWorkbenchStore((state) => state.resolveConflict);
   const setReviewNote = useWorkbenchStore((state) => state.setReviewNote);
-  const reviewTaskIds = useMemo(() => new Set(mockConflicts.map((conflict) => conflict.taskId)), []);
+  const reviewTaskIds = useMemo(() => new Set(reviewConflicts.map((conflict) => conflict.taskId)), [reviewConflicts]);
   const reviewTasks = tasks.filter((task) => reviewTaskIds.has(task.id));
   const [activeTaskId, setActiveTaskId] = useState(reviewTasks[0]?.id ?? tasks[0].id);
-  const conflicts = mockConflicts.filter((conflict) => conflict.taskId === activeTaskId);
-  const [activeConflictId, setActiveConflictId] = useState(conflicts[0]?.id ?? mockConflicts[0].id);
-  const activeConflict = mockConflicts.find((conflict) => conflict.id === activeConflictId) ?? conflicts[0];
+  const conflicts = reviewConflicts.filter((conflict) => conflict.taskId === activeTaskId);
+  const [activeConflictId, setActiveConflictId] = useState(conflicts[0]?.id ?? reviewConflicts[0]?.id ?? "");
+  const activeConflict = reviewConflicts.find((conflict) => conflict.id === activeConflictId) ?? conflicts[0];
   const activeTask = tasks.find((task) => task.id === activeTaskId)!;
   const taskAnnotations = annotations.filter((annotation) => annotation.taskId === activeTaskId);
   const reviewers = Array.from(new Set(taskAnnotations.map((annotation) => annotation.author)));
-  const unresolved = mockConflicts.filter((conflict) => !resolvedConflicts[conflict.id]).length;
+  const unresolved = reviewConflicts.filter((conflict) => conflict.status !== "已确认" || !resolvedConflicts[conflict.id]).length;
   const confidence = activeConflict
-    ? Math.round((activeConflict.candidates.reduce((sum, candidate) => sum + candidate.confidence, 0) / activeConflict.candidates.length) * 100)
+    ? Math.round(
+        (activeConflict.candidates
+          .filter((candidate) => candidate.status !== "invalidated")
+          .reduce((sum, candidate) => sum + candidate.confidence, 0) /
+          Math.max(1, activeConflict.candidates.filter((candidate) => candidate.status !== "invalidated").length)) *
+          100,
+      )
     : 0;
+  const activeTaskContent = activeTask.kind === "text" ? activeTask.content : "";
+  const evidenceMissing = Boolean(activeConflict?.evidenceText) && !activeTaskContent.includes(activeConflict!.evidenceText!);
 
   return (
     <Box sx={{ px: { xs: 1.5, xl: 2.5 }, py: 2, maxWidth: 1840, mx: "auto" }}>
@@ -56,7 +65,7 @@ export default function ReviewPage() {
         <Box sx={{ flex: 1 }}>
           <Typography sx={{ fontSize: 15, fontWeight: 900 }}>多人标注冲突审核</Typography>
           <Typography sx={{ fontSize: 11, color: "text.secondary", mt: 0.35 }}>
-            同一目标的候选结果、置信度与审核备注会保留在本地，适合质检抽样与复核签发。
+            数据组改稿后，候选随新稿件失效与重算；已确认但依据消失的结果会自动退回待处理。
           </Typography>
         </Box>
         <Chip icon={<GroupsRounded />} label={`${reviewers.length} 名标注员`} variant="outlined" />
@@ -82,14 +91,16 @@ export default function ReviewPage() {
           </Box>
           <List dense disablePadding className="scroll-area" sx={{ flex: 1, minHeight: 0, overflowY: "auto", p: 0.8 }}>
             {reviewTasks.map((task) => {
-              const conflictCount = mockConflicts.filter((conflict) => conflict.taskId === task.id && !resolvedConflicts[conflict.id]).length;
+              const conflictCount = reviewConflicts.filter(
+                (conflict) => conflict.taskId === task.id && (conflict.status !== "已确认" || !resolvedConflicts[conflict.id]),
+              ).length;
               return (
                 <ListItemButton
                   key={task.id}
                   selected={task.id === activeTaskId}
                   onClick={() => {
                     setActiveTaskId(task.id);
-                    setActiveConflictId(mockConflicts.find((conflict) => conflict.taskId === task.id)?.id ?? "");
+                    setActiveConflictId(reviewConflicts.find((conflict) => conflict.taskId === task.id)?.id ?? "");
                   }}
                   sx={{ borderRadius: 1.2, mb: 0.6, py: 1 }}
                 >
@@ -136,21 +147,23 @@ export default function ReviewPage() {
             <Typography sx={{ fontSize: 12.5, fontWeight: 900 }}>冲突队列</Typography>
             <Typography sx={{ fontSize: 10, color: "text.secondary", mt: 0.25 }}>选择候选值后立即写入复核结果</Typography>
           </Box>
-          <Stack spacing={0.8} sx={{ p: 1 }}>
+          <Stack spacing={0.8} sx={{ p: 1, maxHeight: 210, overflowY: "auto" }}>
             {conflicts.map((conflict) => {
-              const resolved = resolvedConflicts[conflict.id];
+              const confirmed = conflict.status === "已确认" && Boolean(resolvedConflicts[conflict.id]);
               return (
                 <Button
                   key={conflict.id}
                   variant={activeConflictId === conflict.id ? "contained" : "outlined"}
-                  color={resolved ? "success" : "warning"}
+                  color={confirmed ? "success" : "warning"}
                   onClick={() => setActiveConflictId(conflict.id)}
-                  startIcon={resolved ? <CheckCircleRounded /> : <WarningAmberRounded />}
+                  startIcon={confirmed ? <CheckCircleRounded /> : <WarningAmberRounded />}
                   sx={{ justifyContent: "flex-start", py: 0.85 }}
                 >
                   <Box sx={{ textAlign: "left", minWidth: 0 }}>
                     <Typography noWrap sx={{ fontSize: 11.5, fontWeight: 850 }}>{conflict.target}</Typography>
-                    <Typography sx={{ fontSize: 9.5, opacity: 0.78 }}>{resolved ? "已处理" : `${conflict.candidates.length} 个候选 · ${conflict.severity}`}</Typography>
+                    <Typography sx={{ fontSize: 9.5, opacity: 0.78 }}>
+                      {confirmed ? "已确认" : `${conflict.candidates.filter((candidate) => candidate.status !== "invalidated").length} 个有效候选 · ${conflict.severity}`}
+                    </Typography>
                   </Box>
                 </Button>
               );
@@ -163,25 +176,59 @@ export default function ReviewPage() {
                 <Typography sx={{ fontSize: 11.5, fontWeight: 900, flex: 1 }}>候选结果</Typography>
                 <Chip size="small" label={`平均置信度 ${confidence}%`} />
               </Stack>
+              {activeConflict.status === "已确认" && !resolvedConflicts[activeConflict.id] && (
+                <Chip size="small" color="secondary" label="原确认依据已随修订移除，已退回待处理" sx={{ mb: 1 }} />
+              )}
+              {activeConflict.recomputedByRevision && (
+                <Chip size="small" color="info" variant="outlined" label={`已按修订稿 ${activeConflict.recomputedByRevision} 重算`} sx={{ mb: 1 }} />
+              )}
+              {evidenceMissing && (
+                <Chip size="small" color="error" variant="outlined" label="依据文字不在当前稿件，候选均已失效" sx={{ mb: 1 }} />
+              )}
               <Stack spacing={0.9}>
                 {activeConflict.candidates.map((candidate) => {
                   const selected = resolvedConflicts[activeConflict.id] === candidate.id;
+                  const invalidated = candidate.status === "invalidated";
                   const label = labelsByKind[activeTask.kind].find((item) => item.id === candidate.labelId);
                   return (
                     <Paper
                       key={candidate.id}
                       variant="outlined"
-                      sx={{ p: 1.1, borderColor: selected ? "success.main" : "divider", bgcolor: selected ? "success.50" : "background.paper", cursor: "pointer" }}
-                      onClick={() => resolveConflict(activeConflict.id, candidate.id)}
+                      sx={{
+                        p: 1.1,
+                        borderColor: selected ? "success.main" : invalidated ? "error.light" : "divider",
+                        bgcolor: selected ? "success.50" : invalidated ? "error.50" : "background.paper",
+                        cursor: invalidated ? "not-allowed" : "pointer",
+                        opacity: invalidated ? 0.72 : 1,
+                      }}
+                      onClick={() => !invalidated && resolveConflict(activeConflict.id, candidate.id)}
                     >
                       <Stack direction="row" spacing={0.8} alignItems="center">
                         <Box sx={{ width: 9, height: 9, borderRadius: "50%", bgcolor: label?.color }} />
                         <Typography sx={{ fontSize: 11.5, fontWeight: 900, flex: 1 }}>{candidate.author}</Typography>
-                        <Chip size="small" label={`${Math.round(candidate.confidence * 100)}%`} />
+                        {candidate.recomputed && <Chip size="small" color="info" label="重算" sx={{ height: 19 }} />}
+                        <Chip size="small" label={invalidated ? "已失效" : `${Math.round(candidate.confidence * 100)}%`} color={invalidated ? "error" : "default"} />
                         {selected && <CheckCircleRounded color="success" fontSize="small" />}
                       </Stack>
-                      <Typography sx={{ mt: 0.8, fontSize: 10.8, color: "text.secondary", lineHeight: 1.55 }}>{candidate.value}</Typography>
-                      <Chip size="small" label={label?.name ?? candidate.labelId} sx={{ mt: 0.9, height: 20, bgcolor: `${label?.color}15`, color: label?.color }} />
+                      <Typography
+                        sx={{
+                          mt: 0.8,
+                          fontSize: 10.8,
+                          color: "text.secondary",
+                          lineHeight: 1.55,
+                          textDecoration: invalidated ? "line-through" : "none",
+                        }}
+                      >
+                        {candidate.value}
+                      </Typography>
+                      <Stack direction="row" spacing={0.6} sx={{ mt: 0.9, alignItems: "center" }}>
+                        <Chip size="small" label={label?.name ?? candidate.labelId} sx={{ height: 20, bgcolor: `${label?.color}15`, color: label?.color }} />
+                        {invalidated && candidate.invalidatedByRevision && (
+                          <Typography sx={{ fontSize: 9.5, color: "text.secondary" }}>
+                            依据随 {candidate.invalidatedByRevision} 移除
+                          </Typography>
+                        )}
+                      </Stack>
                     </Paper>
                   );
                 })}
@@ -204,7 +251,7 @@ export default function ReviewPage() {
                 disabled={!resolvedConflicts[activeConflict.id]}
                 onClick={() => {
                   const index = conflicts.findIndex((conflict) => conflict.id === activeConflict.id);
-                  const next = conflicts[index + 1] ?? mockConflicts.find((conflict) => conflict.taskId !== activeTaskId);
+                  const next = conflicts[index + 1] ?? reviewConflicts.find((conflict) => conflict.taskId !== activeTaskId);
                   if (next) setActiveConflictId(next.id);
                 }}
               >

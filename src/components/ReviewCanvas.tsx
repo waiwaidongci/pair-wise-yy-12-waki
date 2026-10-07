@@ -132,7 +132,8 @@ export default function ReviewCanvas({
   }
 
   const spans = annotations.filter(
-    (annotation): annotation is TextSpanAnnotation => annotation.kind === "text-span" && annotation.scope === "span",
+    (annotation): annotation is TextSpanAnnotation =>
+      annotation.kind === "text-span" && annotation.scope === "span" && annotation.anchorStatus !== "dangling",
   );
   return (
     <Box className="scroll-area" sx={{ height: "100%", minHeight: 420, overflowY: "auto", bgcolor: "#fafbfd", p: 3 }}>

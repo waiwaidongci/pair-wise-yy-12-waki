@@ -287,6 +287,8 @@ export const mockAnnotations: Annotation[] = [
     end: 91,
     scope: "span",
     note: "优惠限制没有提前说明",
+    anchorText: longReviewText.slice(58, 91),
+    anchorStatus: "anchored",
   },
   {
     id: "ann-text-001-a-alt",
@@ -300,6 +302,8 @@ export const mockAnnotations: Annotation[] = [
     end: 91,
     scope: "span",
     note: "希望明确提示使用条件",
+    anchorText: longReviewText.slice(58, 91),
+    anchorStatus: "anchored",
   },
   {
     id: "ann-text-001-b",
@@ -313,6 +317,8 @@ export const mockAnnotations: Annotation[] = [
     end: longReviewText.indexOf("13800001234") + "13800001234".length,
     scope: "span",
     note: "手机号需要脱敏",
+    anchorText: "13800001234",
+    anchorStatus: "anchored",
   },
   {
     id: "ann-text-001-c",
@@ -326,6 +332,8 @@ export const mockAnnotations: Annotation[] = [
     end: longReviewText.indexOf("希望帮忙核实") + "希望帮忙核实".length,
     scope: "span",
     note: "明确诉求",
+    anchorText: "希望帮忙核实",
+    anchorStatus: "anchored",
   },
 ];
 
@@ -355,10 +363,12 @@ export const mockConflicts: ReviewConflict[] = [
     taskId: "text-001",
     target: "“优惠券只能在新设备上使用”观点类型",
     severity: "严重",
+    evidenceText: "优惠券只能在新设备上使用",
+    status: "待处理",
     candidates: [
-      { id: "candidate-negative", author: "何序", labelId: "negative", value: "负向观点：规则不透明", confidence: 0.93 },
-      { id: "candidate-request", author: "周岚", labelId: "request", value: "诉求：提前说明限制", confidence: 0.88 },
-      { id: "candidate-neutral", author: "抽检模型", labelId: "neutral", value: "中性事实：描述使用范围", confidence: 0.74 },
+      { id: "candidate-negative", author: "何序", labelId: "negative", value: "负向观点：规则不透明", confidence: 0.93, status: "active" },
+      { id: "candidate-request", author: "周岚", labelId: "request", value: "诉求：提前说明限制", confidence: 0.88, status: "active" },
+      { id: "candidate-neutral", author: "抽检模型", labelId: "neutral", value: "中性事实：描述使用范围", confidence: 0.74, status: "active" },
     ],
   },
 ];

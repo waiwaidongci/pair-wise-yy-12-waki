@@ -7,15 +7,34 @@ import type {
   LabelDefinition,
   LabelTemplate,
   Point,
+  ReviewConflict,
   TaskKind,
+  TextTask,
 } from "../types/annotation";
 import { labelsByKind, mockAnnotations, mockConflicts, mockTasks, mockTemplates } from "../data/mockData";
+import {
+  migrateSpanAnnotations,
+  recomputeReviewConflicts,
+  type RevisionReport,
+} from "../utils/textRevision";
+import { recomputeTextCandidates } from "../utils/textCandidates";
+import { revisionArchive } from "../utils/revisionArchive";
 
 type SaveState = "已保存" | "保存中" | "待保存";
+
+export interface ApplyTextRevisionResult {
+  ok: boolean;
+  reason?: "unchanged" | "write-failed" | "not-text-task";
+  revisionId?: string;
+  report?: RevisionReport;
+  duplicated?: boolean;
+  error?: string;
+}
 
 interface WorkbenchState {
   tasks: AnnotationTask[];
   annotations: Annotation[];
+  reviewConflicts: ReviewConflict[];
   templates: LabelTemplate[];
   customLabels: Record<TaskKind, LabelDefinition[]>;
   activeTaskId: string;
@@ -55,6 +74,8 @@ interface WorkbenchState {
   toggleReviewer: (author: string) => void;
   resolveConflict: (conflictId: string, candidateId: string) => void;
   setReviewNote: (conflictId: string, note: string) => void;
+  /** 接收数据组改好的稿件：区间随原文挪位/悬空留档，候选失效并重算，确认失据退回待处理 */
+  applyTextRevision: (taskId: string, newContent: string) => ApplyTextRevisionResult;
 }
 
 let saveTimer: number | undefined;
@@ -71,11 +92,53 @@ function taskAnnotations(annotations: Annotation[], taskId: string): Annotation[
   return annotations.filter((annotation) => annotation.taskId === taskId);
 }
 
+function getTaskContent(tasks: AnnotationTask[], taskId: string): string {
+  const task = tasks.find((item) => item.id === taskId);
+  return task?.kind === "text" ? task.content : "";
+}
+
+/** 启动时把已落盘的修订稿合进任务，使内存从“上一版”起步 */
+function tasksWithPersistedRevisions(tasks: AnnotationTask[]): AnnotationTask[] {
+  const snapshot = revisionArchive.snapshot();
+  if (!Object.keys(snapshot).length) return tasks;
+  return tasks.map((task) => {
+    const persisted = snapshot[task.id];
+    if (task.kind !== "text" || !persisted) return task;
+    return {
+      ...task,
+      content: persisted.content,
+      contentVersion: persisted.version,
+      lastRevisionId: persisted.lastRevisionId,
+    };
+  });
+}
+
+const initialTasks = tasksWithPersistedRevisions(mockTasks);
+
+/**
+ * 兼容旧持久化数据：没有锚文本的文本区间，用当前稿件对应位置的原文补锚；
+ * 已落在内容范围外的（多半经历过无迁移的旧改稿）不强行补。
+ */
+export function backfillSpanAnchors(annotations: Annotation[], tasks: AnnotationTask[]): Annotation[] {
+  return annotations.map((annotation) => {
+    if (annotation.kind !== "text-span" || annotation.scope !== "span" || annotation.anchorText) return annotation;
+    const task = tasks.find((item) => item.id === annotation.taskId);
+    if (task?.kind !== "text") return annotation;
+    if (annotation.start < 0 || annotation.end > task.content.length || annotation.start >= annotation.end) {
+      return { ...annotation, anchorStatus: "dangling", anchorText: annotation.note ?? "" };
+    }
+    return { ...annotation, anchorText: task.content.slice(annotation.start, annotation.end), anchorStatus: "anchored" };
+  });
+}
+
+const initialAnnotations = backfillSpanAnchors(mockAnnotations, initialTasks);
+
 export const useWorkbenchStore = create<WorkbenchState>()(
   persist(
     (set, get) => ({
-      tasks: mockTasks,
-      annotations: mockAnnotations,
+      tasks: initialTasks,
+      annotations: initialAnnotations,
+      reviewConflicts: mockConflicts,
       templates: mockTemplates,
       customLabels: { image: [], audio: [], text: [] },
       activeTaskId: mockTasks[0].id,
@@ -130,9 +193,18 @@ export const useWorkbenchStore = create<WorkbenchState>()(
       addAnnotation: (annotation) => {
         const taskId = annotation.taskId;
         const current = taskAnnotations(get().annotations, taskId);
+        // 文本区间记下最初对应的原文，改稿时据此挪位
+        const withAnchor =
+          annotation.kind === "text-span" && annotation.scope === "span"
+            ? {
+                ...annotation,
+                anchorText: getTaskContent(get().tasks, taskId).slice(annotation.start, annotation.end),
+                anchorStatus: "anchored" as const,
+              }
+            : annotation;
         set((state) => ({
-          annotations: [...state.annotations, annotation],
-          selectedAnnotationId: annotation.id,
+          annotations: [...state.annotations, withAnchor],
+          selectedAnnotationId: withAnchor.id,
           history: { ...state.history, [taskId]: [...(state.history[taskId] ?? []), structuredClone(current)].slice(-30) },
           future: { ...state.future, [taskId]: [] },
         }));
@@ -212,7 +284,7 @@ export const useWorkbenchStore = create<WorkbenchState>()(
       applyTemplate: (templateId) => {
         const template = get().templates.find((item) => item.id === templateId);
         if (!template) return;
-        set({ activeTemplateId: templateId, activeLabelId: template.labelIds[0] ?? get().activeLabelId });
+        set({ activeTemplateId: template.id, activeLabelId: template.labelIds[0] ?? get().activeLabelId });
       },
 
       createTemplate: (name) => {
@@ -242,16 +314,112 @@ export const useWorkbenchStore = create<WorkbenchState>()(
         set((state) => ({
           reviewerVisibility: { ...state.reviewerVisibility, [author]: !state.reviewerVisibility[author] },
         })),
+
       resolveConflict: (conflictId, candidateId) =>
-        set((state) => ({ resolvedConflicts: { ...state.resolvedConflicts, [conflictId]: candidateId } })),
+        set((state) => {
+          const conflict = state.reviewConflicts.find((item) => item.id === conflictId);
+          const candidate = conflict?.candidates.find((item) => item.id === candidateId);
+          // 已失效的候选不能再被确认
+          if (!conflict || candidate?.status === "invalidated") return state;
+          return {
+            resolvedConflicts: { ...state.resolvedConflicts, [conflictId]: candidateId },
+            reviewConflicts: state.reviewConflicts.map((item) =>
+              item.id === conflictId ? { ...item, status: "已确认" as const } : item,
+            ),
+          };
+        }),
       setReviewNote: (conflictId, note) =>
         set((state) => ({ reviewNotes: { ...state.reviewNotes, [conflictId]: note } })),
+
+      applyTextRevision: (taskId, newContent) => {
+        const task = get().tasks.find((item) => item.id === taskId);
+        if (!task || task.kind !== "text") return { ok: false, reason: "not-text-task" };
+        const oldContent = task.content;
+        const fromVersion = task.contentVersion ?? 0;
+
+        // 与当前稿件相同：只有当这是此前已落档修订的重复送达时才按幂等成功返回，
+        // 否则就是没有新内容，不产生新版本
+        const latest = revisionArchive.latestForTask(taskId);
+        if (newContent === oldContent) {
+          if (latest?.newContent === newContent) {
+            return { ok: true, duplicated: true, revisionId: latest.revisionId, report: latest.report };
+          }
+          return { ok: false, reason: "unchanged" };
+        }
+        const revisionId = `rev-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+
+        // 先在内存里算好迁移结果（尚未生效）
+        const spanMigration = migrateSpanAnnotations(get().annotations, taskId, oldContent, newContent, revisionId);
+        const conflictMigration = recomputeReviewConflicts(
+          get().reviewConflicts,
+          taskId,
+          newContent,
+          revisionId,
+          recomputeTextCandidates,
+        );
+
+        const report: RevisionReport = {
+          revisionId,
+          taskId,
+          oldVersion: fromVersion,
+          newVersion: fromVersion + 1,
+          moved: spanMigration.moved,
+          dangled: spanMigration.dangled,
+          invalidatedCandidates: conflictMigration.invalidatedCandidates,
+          recomputedCandidates: conflictMigration.recomputedCandidates,
+          reopenedConflicts: conflictMigration.reopenedConflicts,
+        };
+
+        // 先落盘：失败则上一版原样保留，内存一个字段都不动
+        const committed = revisionArchive.commit({
+          revisionId,
+          taskId,
+          fromVersion,
+          oldContent,
+          newContent,
+          report,
+        });
+        if (!committed.ok) {
+          return { ok: false, reason: "write-failed", error: committed.error };
+        }
+        // 同一修订重试：落盘侧已幂等，内存也不重复追加/迁移
+        if (committed.duplicated) {
+          return { ok: true, duplicated: true, revisionId: committed.entry.revisionId, report: committed.entry.report };
+        }
+
+        // 已确认但依据消失的冲突退回待处理
+        const resolvedConflicts = { ...get().resolvedConflicts };
+        for (const reopened of conflictMigration.reopenedConflicts) delete resolvedConflicts[reopened];
+
+        set((state) => ({
+          tasks: state.tasks.map((item) =>
+            item.id === taskId && item.kind === "text"
+              ? ({
+                  ...item,
+                  content: newContent,
+                  contentVersion: fromVersion + 1,
+                  lastRevisionId: revisionId,
+                  updatedAt: new Date().toISOString(),
+                } satisfies TextTask)
+              : item,
+          ),
+          annotations: spanMigration.annotations,
+          reviewConflicts: conflictMigration.conflicts,
+          resolvedConflicts,
+          history: { ...state.history, [taskId]: [] },
+          future: { ...state.future, [taskId]: [] },
+          selectedAnnotationId: null,
+        }));
+        scheduleSaved(set);
+        return { ok: true, revisionId, report };
+      },
     }),
     {
       name: "annotation-workbench-v1",
       storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
         annotations: state.annotations,
+        reviewConflicts: state.reviewConflicts,
         customLabels: state.customLabels,
         templates: state.templates,
         activeTaskId: state.activeTaskId,
@@ -260,6 +428,18 @@ export const useWorkbenchStore = create<WorkbenchState>()(
         reviewNotes: state.reviewNotes,
         batchSelection: state.batchSelection,
       }),
+      merge: (persisted, current) => {
+        const saved = (persisted ?? {}) as Partial<WorkbenchState>;
+        const merged: WorkbenchState = {
+          ...current,
+          ...saved,
+          // 旧持久化里没有审核冲突时，沿用当前内置冲突，避免审核页读空
+          reviewConflicts: saved.reviewConflicts ?? current.reviewConflicts,
+        };
+        // 旧持久化里的文本区间可能没有锚文本，按当前稿件回填
+        merged.annotations = backfillSpanAnchors(merged.annotations, merged.tasks);
+        return merged;
+      },
     },
   ),
 );
@@ -268,6 +448,6 @@ export function labelsForTask(taskKind: TaskKind, customLabels: Record<TaskKind,
   return [...labelsByKind[taskKind], ...customLabels[taskKind]];
 }
 
-export function allReviewConflicts() {
-  return mockConflicts;
+export function allReviewConflicts(): ReviewConflict[] {
+  return useWorkbenchStore.getState().reviewConflicts;
 }
