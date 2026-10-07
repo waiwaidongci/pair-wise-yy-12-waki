@@ -22,29 +22,31 @@ import {
   WarningAmberRounded,
 } from "@mui/icons-material";
 import ReviewCanvas from "../components/ReviewCanvas";
-import { labelsByKind, mockConflicts } from "../data/mockData";
+import { labelsByKind } from "../data/mockData";
 import { useWorkbenchStore } from "../stores/workbenchStore";
 import { taskKindLabels } from "../utils/task";
 
 export default function ReviewPage() {
   const tasks = useWorkbenchStore((state) => state.tasks);
   const annotations = useWorkbenchStore((state) => state.annotations);
+  const conflicts = useWorkbenchStore((state) => state.conflicts);
+  const conflictBasis = useWorkbenchStore((state) => state.conflictBasis);
   const reviewerVisibility = useWorkbenchStore((state) => state.reviewerVisibility);
   const resolvedConflicts = useWorkbenchStore((state) => state.resolvedConflicts);
   const reviewNotes = useWorkbenchStore((state) => state.reviewNotes);
   const toggleReviewer = useWorkbenchStore((state) => state.toggleReviewer);
   const resolveConflict = useWorkbenchStore((state) => state.resolveConflict);
   const setReviewNote = useWorkbenchStore((state) => state.setReviewNote);
-  const reviewTaskIds = useMemo(() => new Set(mockConflicts.map((conflict) => conflict.taskId)), []);
+  const reviewTaskIds = useMemo(() => new Set(conflicts.map((conflict) => conflict.taskId)), [conflicts]);
   const reviewTasks = tasks.filter((task) => reviewTaskIds.has(task.id));
   const [activeTaskId, setActiveTaskId] = useState(reviewTasks[0]?.id ?? tasks[0].id);
-  const conflicts = mockConflicts.filter((conflict) => conflict.taskId === activeTaskId);
-  const [activeConflictId, setActiveConflictId] = useState(conflicts[0]?.id ?? mockConflicts[0].id);
-  const activeConflict = mockConflicts.find((conflict) => conflict.id === activeConflictId) ?? conflicts[0];
+  const taskConflicts = conflicts.filter((conflict) => conflict.taskId === activeTaskId);
+  const [activeConflictId, setActiveConflictId] = useState(taskConflicts[0]?.id ?? conflicts[0]?.id);
+  const activeConflict = conflicts.find((conflict) => conflict.id === activeConflictId) ?? taskConflicts[0];
   const activeTask = tasks.find((task) => task.id === activeTaskId)!;
   const taskAnnotations = annotations.filter((annotation) => annotation.taskId === activeTaskId);
   const reviewers = Array.from(new Set(taskAnnotations.map((annotation) => annotation.author)));
-  const unresolved = mockConflicts.filter((conflict) => !resolvedConflicts[conflict.id]).length;
+  const unresolved = conflicts.filter((conflict) => !resolvedConflicts[conflict.id]).length;
   const confidence = activeConflict
     ? Math.round((activeConflict.candidates.reduce((sum, candidate) => sum + candidate.confidence, 0) / activeConflict.candidates.length) * 100)
     : 0;
@@ -82,14 +84,14 @@ export default function ReviewPage() {
           </Box>
           <List dense disablePadding className="scroll-area" sx={{ flex: 1, minHeight: 0, overflowY: "auto", p: 0.8 }}>
             {reviewTasks.map((task) => {
-              const conflictCount = mockConflicts.filter((conflict) => conflict.taskId === task.id && !resolvedConflicts[conflict.id]).length;
+              const conflictCount = conflicts.filter((conflict) => conflict.taskId === task.id && !resolvedConflicts[conflict.id]).length;
               return (
                 <ListItemButton
                   key={task.id}
                   selected={task.id === activeTaskId}
                   onClick={() => {
                     setActiveTaskId(task.id);
-                    setActiveConflictId(mockConflicts.find((conflict) => conflict.taskId === task.id)?.id ?? "");
+                    setActiveConflictId(conflicts.find((conflict) => conflict.taskId === task.id)?.id ?? "");
                   }}
                   sx={{ borderRadius: 1.2, mb: 0.6, py: 1 }}
                 >
@@ -139,18 +141,23 @@ export default function ReviewPage() {
           <Stack spacing={0.8} sx={{ p: 1 }}>
             {conflicts.map((conflict) => {
               const resolved = resolvedConflicts[conflict.id];
+              const basis = conflictBasis[conflict.id];
               return (
                 <Button
                   key={conflict.id}
                   variant={activeConflictId === conflict.id ? "contained" : "outlined"}
-                  color={resolved ? "success" : "warning"}
+                  color={basis?.state === "invalid" ? "error" : resolved ? "success" : "warning"}
                   onClick={() => setActiveConflictId(conflict.id)}
                   startIcon={resolved ? <CheckCircleRounded /> : <WarningAmberRounded />}
                   sx={{ justifyContent: "flex-start", py: 0.85 }}
                 >
                   <Box sx={{ textAlign: "left", minWidth: 0 }}>
                     <Typography noWrap sx={{ fontSize: 11.5, fontWeight: 850 }}>{conflict.target}</Typography>
-                    <Typography sx={{ fontSize: 9.5, opacity: 0.78 }}>{resolved ? "已处理" : `${conflict.candidates.length} 个候选 · ${conflict.severity}`}</Typography>
+                    <Stack direction="row" spacing={0.5} alignItems="center" sx={{ mt: 0.3 }}>
+                      <Typography sx={{ fontSize: 9.5, opacity: 0.78 }}>{resolved ? "已处理" : `${conflict.candidates.length} 个候选 · ${conflict.severity}`}</Typography>
+                      {basis?.state === "invalid" && <Chip size="small" color="error" label="依据失效" sx={{ height: 16, fontSize: 8.5 }} />}
+                      {basis?.state === "moved" && <Chip size="small" color="info" label="已按新稿件重算" sx={{ height: 16, fontSize: 8.5 }} />}
+                    </Stack>
                   </Box>
                 </Button>
               );
@@ -164,19 +171,36 @@ export default function ReviewPage() {
                 <Chip size="small" label={`平均置信度 ${confidence}%`} />
               </Stack>
               <Stack spacing={0.9}>
+                {activeConflict.archivedCandidates && (
+                  <Paper variant="outlined" sx={{ p: 0.8, bgcolor: "info.50", borderColor: "info.light" }}>
+                    <Typography sx={{ fontSize: 10, color: "info.dark" }}>
+                      原候选已留档，以下候选按新稿件重算
+                    </Typography>
+                  </Paper>
+                )}
                 {activeConflict.candidates.map((candidate) => {
                   const selected = resolvedConflicts[activeConflict.id] === candidate.id;
                   const label = labelsByKind[activeTask.kind].find((item) => item.id === candidate.labelId);
+                  const invalid = Boolean(candidate.invalid);
                   return (
                     <Paper
                       key={candidate.id}
                       variant="outlined"
-                      sx={{ p: 1.1, borderColor: selected ? "success.main" : "divider", bgcolor: selected ? "success.50" : "background.paper", cursor: "pointer" }}
-                      onClick={() => resolveConflict(activeConflict.id, candidate.id)}
+                      sx={{
+                        p: 1.1,
+                        borderColor: invalid ? "error.light" : selected ? "success.main" : "divider",
+                        bgcolor: invalid ? "error.50" : selected ? "success.50" : "background.paper",
+                        cursor: invalid ? "not-allowed" : "pointer",
+                        opacity: invalid ? 0.75 : 1,
+                      }}
+                      onClick={() => {
+                        if (!invalid) resolveConflict(activeConflict.id, candidate.id);
+                      }}
                     >
                       <Stack direction="row" spacing={0.8} alignItems="center">
                         <Box sx={{ width: 9, height: 9, borderRadius: "50%", bgcolor: label?.color }} />
                         <Typography sx={{ fontSize: 11.5, fontWeight: 900, flex: 1 }}>{candidate.author}</Typography>
+                        {invalid && <Chip size="small" color="error" label="已失效" sx={{ height: 18, fontSize: 9 }} />}
                         <Chip size="small" label={`${Math.round(candidate.confidence * 100)}%`} />
                         {selected && <CheckCircleRounded color="success" fontSize="small" />}
                       </Stack>
@@ -204,7 +228,7 @@ export default function ReviewPage() {
                 disabled={!resolvedConflicts[activeConflict.id]}
                 onClick={() => {
                   const index = conflicts.findIndex((conflict) => conflict.id === activeConflict.id);
-                  const next = conflicts[index + 1] ?? mockConflicts.find((conflict) => conflict.taskId !== activeTaskId);
+                  const next = conflicts[index + 1] ?? conflicts.find((conflict) => conflict.taskId !== activeTaskId);
                   if (next) setActiveConflictId(next.id);
                 }}
               >

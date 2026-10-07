@@ -6,6 +6,7 @@ import {
   Chip,
   CircularProgress,
   Divider,
+  IconButton,
   LinearProgress,
   Stack,
   Toolbar,
@@ -17,7 +18,9 @@ import {
   CloudDoneRounded,
   KeyboardAltRounded,
   RateReviewRounded,
+  RefreshRounded,
   SensorsRounded,
+  WarningAmberRounded,
 } from "@mui/icons-material";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useWorkspaceSummary } from "../queries/workspace";
@@ -29,7 +32,9 @@ export default function AppShell() {
   const { data, isLoading } = useWorkspaceSummary();
   const autosave = useWorkbenchStore((state) => state.autosave);
   const lastSavedAt = useWorkbenchStore((state) => state.lastSavedAt);
+  const persistStatus = useWorkbenchStore((state) => state.persistStatus);
   const saveNow = useWorkbenchStore((state) => state.saveNow);
+  const retryPersist = useWorkbenchStore((state) => state.retryPersist);
 
   return (
     <Box sx={{ minHeight: "100vh", bgcolor: "background.default" }}>
@@ -82,16 +87,37 @@ export default function AppShell() {
 
           <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
 
-          <Tooltip title={`最近保存：${new Date(lastSavedAt).toLocaleTimeString("zh-CN", { hour12: false })}`}>
-            <Button
-              size="small"
-              color={autosave === "保存中" ? "warning" : "inherit"}
-              startIcon={<CloudDoneRounded />}
-              onClick={saveNow}
-            >
-              {autosave}
-            </Button>
-          </Tooltip>
+          {persistStatus.pending ? (
+            <Stack direction="row" spacing={0.4} alignItems="center">
+              <Tooltip title={`落盘失败：${persistStatus.error ?? "未知错误"}。上一版内容已保留，点击重试（不会重复追加）`}>
+                <Button
+                  size="small"
+                  color="error"
+                  startIcon={<WarningAmberRounded />}
+                  variant="outlined"
+                  onClick={retryPersist}
+                >
+                  保存失败 · 点击重试
+                </Button>
+              </Tooltip>
+              <Tooltip title="重试落盘">
+                <IconButton size="small" color="error" onClick={retryPersist}>
+                  <RefreshRounded fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            </Stack>
+          ) : (
+            <Tooltip title={`最近保存：${new Date(lastSavedAt).toLocaleTimeString("zh-CN", { hour12: false })}`}>
+              <Button
+                size="small"
+                color={autosave === "保存中" ? "warning" : "inherit"}
+                startIcon={<CloudDoneRounded />}
+                onClick={saveNow}
+              >
+                {autosave}
+              </Button>
+            </Tooltip>
+          )}
           <Tooltip title="快捷键：1-5 标签，B/P/K 工具，N 下一题，空格播放音频">
             <Button size="small" color="inherit" startIcon={<KeyboardAltRounded />} sx={{ display: { xs: "none", lg: "inline-flex" } }}>
               快捷键
@@ -99,7 +125,7 @@ export default function AppShell() {
           </Tooltip>
           <Avatar sx={{ width: 34, height: 34, fontSize: 13, bgcolor: "#34435b" }}>林</Avatar>
         </Toolbar>
-        {autosave === "保存中" && <LinearProgress sx={{ height: 2 }} />}
+        {autosave === "保存中" && <LinearProgress color={persistStatus.pending ? "error" : "primary"} sx={{ height: 2 }} />}
       </AppBar>
       <Outlet />
       <Box component="footer" sx={{ px: 3, py: 2, color: "text.secondary", fontSize: 11, display: "flex", justifyContent: "space-between" }}>

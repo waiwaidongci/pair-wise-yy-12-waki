@@ -82,6 +82,7 @@ export default function InspectorPanel() {
         )}
         {taskAnnotations.map((annotation) => {
           const label = labels.find((item) => item.id === annotation.labelId);
+          const dangling = annotation.kind === "text-span" && Boolean((annotation as { dangling?: boolean }).dangling);
           return (
             <ListItem
               key={annotation.id}
@@ -95,12 +96,21 @@ export default function InspectorPanel() {
               <ListItemButton
                 selected={selectedAnnotationId === annotation.id}
                 onClick={() => selectAnnotation(annotation.id)}
-                sx={{ borderRadius: 1, pr: 6 }}
+                sx={{ borderRadius: 1, pr: 6, opacity: dangling ? 0.62 : 1 }}
               >
                 <Box sx={{ width: 9, height: 9, borderRadius: "50%", bgcolor: label?.color ?? "#777", mr: 1.2, flexShrink: 0 }} />
                 <ListItemText
-                  primary={`${label?.name ?? "未命名"} · ${annotationLabel(annotation.kind)}`}
-                  secondary={`${annotation.author} · 置信度 ${((annotation.confidence ?? 0.9) * 100).toFixed(0)}%`}
+                  primary={
+                    <Stack direction="row" spacing={0.6} alignItems="center">
+                      <Typography sx={{ fontSize: 11.5, fontWeight: 800 }}>{label?.name ?? "未命名"} · {annotationLabel(annotation.kind)}</Typography>
+                      {dangling && <Chip size="small" color="warning" label="悬空" sx={{ height: 17, fontSize: 9 }} />}
+                    </Stack>
+                  }
+                  secondary={
+                    dangling && annotation.kind === "text-span" && (annotation as { anchorText?: string }).anchorText
+                      ? `「${(annotation as { anchorText: string }).anchorText.slice(0, 24)}」`
+                      : `${annotation.author} · 置信度 ${((annotation.confidence ?? 0.9) * 100).toFixed(0)}%`
+                  }
                   primaryTypographyProps={{ fontSize: 11.5, fontWeight: 800 }}
                   secondaryTypographyProps={{ fontSize: 9.8 }}
                 />

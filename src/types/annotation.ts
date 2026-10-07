@@ -55,6 +55,15 @@ export interface TextSpanAnnotation extends AnnotationBase {
   end: number;
   scope: "span" | "document";
   note?: string;
+  /** 悬空区间：原所指文字在新稿件中整段不存在，区间保留归档但不再高亮 */
+  dangling?: boolean;
+  /** 悬空/重锚定时区间原先对应的那段文字 */
+  anchorText?: string;
+  /** 悬空原因（整段删除、重锚定失败等） */
+  danglingReason?: string;
+  /** 最近一次应用的稿件修订 id */
+  revisionId?: string;
+  danglingAt?: string;
 }
 
 export type Annotation =
@@ -111,6 +120,37 @@ export interface ReviewCandidate {
   labelId: string;
   value: string;
   confidence: number;
+  /** 依据已随稿件修订失效，等待按新稿件重算 */
+  invalid?: boolean;
+}
+
+/** 一次稿件修订的留档记录 */
+export interface TextRevisionRecord {
+  id: string;
+  taskId: string;
+  at: string;
+  source: string;
+  /** 重锚定成功（含位置移动）的区间数 */
+  reanchored: number;
+  /** 所指文字未变、无需移动的区间数 */
+  unchanged: number;
+  /** 整段被拿掉、标为悬空的区间数 */
+  dangling: number;
+  /** 文档级标签数（随稿件长度平移） */
+  documentLabels: number;
+}
+
+/** 冲突依据文本在新稿件中的状态 */
+export type ConflictBasisState = "ok" | "moved" | "invalid";
+
+export interface ConflictBasisStatus {
+  state: ConflictBasisState;
+  /** 冲突依据的原文（从 target / 候选描述中抽取的引用片段） */
+  basisText: string;
+  checkedAt: string;
+  /** 依据在新稿件中移动后的新文本（重算成功时写入） */
+  resolvedText?: string;
+  reason?: string;
 }
 
 export interface ReviewConflict {
@@ -119,6 +159,8 @@ export interface ReviewConflict {
   target: string;
   severity: "轻微" | "一般" | "严重";
   candidates: ReviewCandidate[];
+  /** 稿件修订重算后，被替换下来的原候选（留档可查） */
+  archivedCandidates?: ReviewCandidate[];
 }
 
 export interface AnnotationDraft {

@@ -4,19 +4,30 @@ import type {
   Annotation,
   AnnotationTask,
   AnnotationTool,
+  ConflictBasisStatus,
   LabelDefinition,
   LabelTemplate,
   Point,
+  ReviewConflict,
   TaskKind,
+  TextRevisionRecord,
+  TextSpanAnnotation,
 } from "../types/annotation";
 import { labelsByKind, mockAnnotations, mockConflicts, mockTasks, mockTemplates } from "../data/mockData";
+import { createSafeStorage, type PersistStatus } from "../utils/safeStorage";
+import { reanchorSpans, revalidateConflict } from "../utils/textRevision";
 
-type SaveState = "已保存" | "保存中" | "待保存";
+type SaveState = "已保存" | "保存中" | "待保存" | "保存失败";
 
 interface WorkbenchState {
   tasks: AnnotationTask[];
   annotations: Annotation[];
   templates: LabelTemplate[];
+  conflicts: ReviewConflict[];
+  /** 文本任务的稿件修订留档，按 taskId 分组，最新在前 */
+  textRevisions: Record<string, TextRevisionRecord[]>;
+  /** 冲突依据文本在最近一次稿件修订后的状态 */
+  conflictBasis: Record<string, ConflictBasisStatus>;
   customLabels: Record<TaskKind, LabelDefinition[]>;
   activeTaskId: string;
   activeTool: AnnotationTool;
@@ -26,6 +37,7 @@ interface WorkbenchState {
   batchSelection: string[];
   autosave: SaveState;
   lastSavedAt: string;
+  persistStatus: PersistStatus;
   zoom: number;
   pan: Point;
   history: Record<string, Annotation[][]>;
@@ -45,6 +57,8 @@ interface WorkbenchState {
   undo: () => void;
   redo: () => void;
   saveNow: () => void;
+  retryPersist: () => void;
+  reviseTextTask: (taskId: string, newContent: string, options?: { source?: string; simulateFailure?: boolean }) => void;
   setViewport: (zoom: number, pan: Point) => void;
   resetViewport: () => void;
   toggleBatchTask: (taskId: string) => void;
@@ -57,13 +71,19 @@ interface WorkbenchState {
   setReviewNote: (conflictId: string, note: string) => void;
 }
 
+const safeStorage = createSafeStorage();
+
 let saveTimer: number | undefined;
 
 function scheduleSaved(set: (state: Partial<WorkbenchState>) => void) {
   if (saveTimer) window.clearTimeout(saveTimer);
   set({ autosave: "保存中" });
   saveTimer = window.setTimeout(() => {
-    set({ autosave: "已保存", lastSavedAt: new Date().toISOString() });
+    const failed = safeStorage.getStatus().pending;
+    set({
+      autosave: failed ? "保存失败" : "已保存",
+      lastSavedAt: failed ? useWorkbenchStore.getState().lastSavedAt : new Date().toISOString(),
+    });
   }, 420);
 }
 
@@ -77,6 +97,9 @@ export const useWorkbenchStore = create<WorkbenchState>()(
       tasks: mockTasks,
       annotations: mockAnnotations,
       templates: mockTemplates,
+      conflicts: mockConflicts,
+      textRevisions: {},
+      conflictBasis: {},
       customLabels: { image: [], audio: [], text: [] },
       activeTaskId: mockTasks[0].id,
       activeTool: "select",
@@ -86,6 +109,7 @@ export const useWorkbenchStore = create<WorkbenchState>()(
       batchSelection: [],
       autosave: "已保存",
       lastSavedAt: new Date().toISOString(),
+      persistStatus: safeStorage.getStatus(),
       zoom: 0.68,
       pan: { x: 0, y: 0 },
       history: {},
@@ -196,7 +220,155 @@ export const useWorkbenchStore = create<WorkbenchState>()(
 
       saveNow: () => {
         if (saveTimer) window.clearTimeout(saveTimer);
+        if (safeStorage.getStatus().pending) {
+          get().retryPersist();
+          return;
+        }
         set({ autosave: "已保存", lastSavedAt: new Date().toISOString() });
+      },
+
+      retryPersist: () => {
+        if (saveTimer) window.clearTimeout(saveTimer);
+        set({ autosave: "保存中" });
+        safeStorage.retry();
+        const status = safeStorage.getStatus();
+        set({
+          persistStatus: status,
+          autosave: status.pending ? "保存失败" : "已保存",
+          lastSavedAt: status.pending ? get().lastSavedAt : new Date().toISOString(),
+        });
+      },
+
+      reviseTextTask: (taskId, newContent, options) => {
+        const task = get().tasks.find((item) => item.id === taskId);
+        if (!task || task.kind !== "text") return;
+        const oldContent = task.content;
+        // 幂等：内容未变不产生任何追加，重试不会重复落修订
+        if (newContent === oldContent) return;
+
+        const now = new Date().toISOString();
+        const revisionId = `rev-${Date.now()}`;
+        const existingSpans = get()
+          .annotations.filter(
+            (annotation): annotation is TextSpanAnnotation =>
+              annotation.taskId === taskId && annotation.kind === "text-span" && annotation.scope === "span" && !annotation.dangling,
+          );
+        const outcomes = reanchorSpans(oldContent, newContent, existingSpans);
+        const outcomeById = new Map(outcomes.map((outcome) => [outcome.annotationId, outcome]));
+
+        let reanchored = 0;
+        let unchanged = 0;
+        let dangling = 0;
+        let documentLabels = 0;
+        const nextAnnotations = get().annotations.map((annotation) => {
+          if (annotation.taskId !== taskId || annotation.kind !== "text-span") return annotation;
+          const span = annotation as TextSpanAnnotation;
+          if (span.scope === "document") {
+            documentLabels += 1;
+            // 文档级标签覆盖全文，随新稿件长度平移
+            return { ...span, end: newContent.length, revisionId };
+          }
+          if (span.dangling) return span; // 已悬空的区间继续留档，不重复处理
+          const outcome = outcomeById.get(span.id);
+          if (!outcome) return span;
+          if (outcome.status === "dangling") {
+            dangling += 1;
+            return {
+              ...span,
+              dangling: true,
+              start: outcome.start,
+              end: outcome.end,
+              anchorText: outcome.anchorText,
+              danglingReason: outcome.reason,
+              danglingAt: now,
+              revisionId,
+            };
+          }
+          if (outcome.status === "moved") {
+            reanchored += 1;
+            return {
+              ...span,
+              start: outcome.start,
+              end: outcome.end,
+              anchorText: outcome.anchorText,
+              dangling: false,
+              danglingReason: undefined,
+              revisionId,
+            };
+          }
+          unchanged += 1;
+          return { ...span, revisionId };
+        });
+
+        // 冲突依据重校验：失效候选作废重算，已确认但依据不在的退回待处理
+        const nextConflicts = [...get().conflicts];
+        const nextBasis = { ...get().conflictBasis };
+        const nextResolved = { ...get().resolvedConflicts };
+        for (const conflict of get().conflicts.filter((item) => item.taskId === taskId)) {
+          const result = revalidateConflict(conflict, newContent);
+          nextBasis[conflict.id] = {
+            state: result.state,
+            basisText: result.basisText,
+            checkedAt: now,
+            resolvedText: result.resolvedText,
+            reason: result.reason,
+          };
+          if (result.state === "ok") continue;
+          const index = nextConflicts.findIndex((item) => item.id === conflict.id);
+          if (index < 0) continue;
+          if (result.state === "moved" && result.candidates) {
+            const recalculated = result.candidates;
+            nextConflicts[index] = {
+              ...conflict,
+              target: result.target ?? conflict.target,
+              candidates: recalculated,
+              archivedCandidates: conflict.candidates,
+            };
+            // 已确认的候选被重算替换：把确认关系平移到同作者的新候选，找不到则退回待处理
+            const resolvedId = nextResolved[conflict.id];
+            if (resolvedId) {
+              const previous = conflict.candidates.find((candidate) => candidate.id === resolvedId);
+              const replacement = recalculated.find((candidate) => candidate.author === previous?.author);
+              if (replacement) nextResolved[conflict.id] = replacement.id;
+              else delete nextResolved[conflict.id];
+            }
+          } else {
+            // 依据整段消失：候选直接失效；已确认的退回待处理
+            nextConflicts[index] = {
+              ...conflict,
+              candidates: conflict.candidates.map((candidate) => ({ ...candidate, invalid: true })),
+            };
+            delete nextResolved[conflict.id];
+          }
+        }
+
+        const record: TextRevisionRecord = {
+          id: revisionId,
+          taskId,
+          at: now,
+          source: options?.source ?? "数据组修订",
+          reanchored,
+          unchanged,
+          dangling,
+          documentLabels,
+        };
+
+        if (options?.simulateFailure) safeStorage.armFailure();
+
+        set((state) => ({
+          tasks: state.tasks.map((item) =>
+            item.id === taskId ? { ...item, content: newContent, updatedAt: now } : item,
+          ),
+          annotations: nextAnnotations,
+          conflicts: nextConflicts,
+          conflictBasis: nextBasis,
+          resolvedConflicts: nextResolved,
+          textRevisions: {
+            ...state.textRevisions,
+            [taskId]: [record, ...(state.textRevisions[taskId] ?? [])],
+          },
+        }));
+        scheduleSaved(set);
       },
 
       setViewport: (zoom, pan) => set({ zoom, pan }),
@@ -249,11 +421,14 @@ export const useWorkbenchStore = create<WorkbenchState>()(
     }),
     {
       name: "annotation-workbench-v1",
-      storage: createJSONStorage(() => localStorage),
+      storage: createJSONStorage(() => safeStorage.storage),
       partialize: (state) => ({
         annotations: state.annotations,
         customLabels: state.customLabels,
         templates: state.templates,
+        conflicts: state.conflicts,
+        textRevisions: state.textRevisions,
+        conflictBasis: state.conflictBasis,
         activeTaskId: state.activeTaskId,
         reviewerVisibility: state.reviewerVisibility,
         resolvedConflicts: state.resolvedConflicts,
@@ -263,6 +438,13 @@ export const useWorkbenchStore = create<WorkbenchState>()(
     },
   ),
 );
+
+safeStorage.subscribe((status) => {
+  useWorkbenchStore.setState({
+    persistStatus: status,
+    autosave: status.pending ? "保存失败" : "已保存",
+  });
+});
 
 export function labelsForTask(taskKind: TaskKind, customLabels: Record<TaskKind, LabelDefinition[]>): LabelDefinition[] {
   return [...labelsByKind[taskKind], ...customLabels[taskKind]];
