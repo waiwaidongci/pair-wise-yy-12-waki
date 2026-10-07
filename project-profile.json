@@ -1,0 +1,11 @@
+{
+  "projectId": "pair-wise-yy-12",
+  "projectName": "衡准数据标注工作台",
+  "category": "数据标注",
+  "businessDomain": "研发工具",
+  "projectForm": "完整项目",
+  "codeScope": "frontend",
+  "languages": "React, TypeScript, Canvas, MUI, Zustand, TanStack Query, Vite",
+  "summary": "图片、音频、文本三类标注任务，支持矩形框、多边形、关键点、片段标签、自动保存与冲突审核。",
+  "containerized": false
+}
